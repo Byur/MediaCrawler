@@ -2,7 +2,8 @@ import { useState } from 'react'
 import { Toaster } from 'sonner'
 import { Sidebar } from '@/components/layout/Sidebar'
 import { MainContent } from '@/components/layout/MainContent'
-import { AuthorFooter } from '@/components/layout/AuthorFooter'
+// 个人 fork：隐藏原作者页脚（组件源码保留在 AuthorFooter.tsx）
+// import { AuthorFooter } from '@/components/layout/AuthorFooter'
 import { CrawlerConfigPanel } from '@/components/config/CrawlerConfigPanel'
 import { EnvironmentCheck, isEnvChecked } from '@/components/env/EnvironmentCheck'
 import { LicenseDisclaimer, isLicenseAccepted } from '@/components/license/LicenseDisclaimer'
@@ -54,8 +55,9 @@ function App() {
         <MainContent />
       </div>
 
-      {/* Author Footer */}
+      {/* 个人 fork：原作者信息页脚已隐藏，保留源码备查
       <AuthorFooter />
+      */}
 
       {/* Toast notifications - Theme-aware style */}
       <Toaster

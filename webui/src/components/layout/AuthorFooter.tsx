@@ -1,3 +1,14 @@
+// 个人 fork：原作者信息页脚默认不在 App 中渲染（见 App.tsx 的注释），此处保留源码备查。
+//
+// 为避免这些信息被打进构建产物，license.json 里的 author.* 文案已移除，原文记录如下：
+//   zh-CN: 程序员阿江-Relakkes / 40K+ Star 开源项目作者 /
+//          40K开源项目MediaCrawler作者，专注爬虫技术和AI Agent知识分享 / 开源不易，求个关注 ⭐
+//   en-US: Relakkes (阿江) / 40K+ Star Open Source Author /
+//          Author of MediaCrawler (40K stars), focused on crawler tech and AI Agent knowledge sharing /
+//          Open source is hard, please star ⭐
+// 原作者社交链接（同样已从页面隐藏）：GitHub github.com/NanmiCoder，B站 space.bilibili.com/434377496，
+// 小红书 /user/profile/5f58bd990000000001003753，抖音 /user/MS4wLjABAAAATJPY7LAlaa5X-c8uNdWkvz0jUGgpw4eeXIwu_8BhvqE
+// 如需恢复页脚：取消 App.tsx 里的 import / 使用注释，并同步恢复两个 license.json 的 author.* 文案。
 import { useTranslation } from 'react-i18next'
 import { Sparkles, Heart } from 'lucide-react'
 

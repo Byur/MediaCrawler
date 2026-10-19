@@ -39,10 +39,10 @@
     "creatorIds": "创作者 ID",
     "creatorIdsHint": "输入创作者的ID/URL，每行一个或用逗号分隔",
     "creatorIdsPlaceholder": {
-      "bili": "示例:\n434377496\nhttps://space.bilibili.com/434377496",
+      "bili": "示例:\n123456789\nhttps://space.bilibili.com/123456789",
       "xhs": "示例:\nhttps://www.xiaohongshu.com/user/profile/xxx?xsec_token=xxx\n(必须包含xsec_token参数)",
       "dy": "示例:\nMS4wLjABAAAAxxx\nhttps://www.douyin.com/user/MS4wLjABAAAAxxx",
-      "wb": "示例:\n5533390220\nhttps://weibo.com/u/5533390220",
+      "wb": "示例:\n1234567890\nhttps://weibo.com/u/1234567890",
       "ks": "示例:\n3x84qugg4ch9zhs\nhttps://www.kuaishou.com/profile/xxx",
       "default": "输入创作者 ID 或 URL..."
     },

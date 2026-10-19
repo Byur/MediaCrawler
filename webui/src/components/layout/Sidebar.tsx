@@ -1,4 +1,6 @@
-import { Bug, Wifi, AlertTriangle, Github } from 'lucide-react'
+import { Bug, Wifi, AlertTriangle } from 'lucide-react'
+// 个人 fork：隐藏指向原作者仓库的 Star 入口（源码保留）
+// import { Github } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
 import { useCrawlerStore } from '@/store/crawlerStore'
@@ -29,6 +31,7 @@ export function Sidebar({ onShowDisclaimer }: SidebarProps) {
           <span className="font-mono font-bold text-cyber-text-primary tracking-wider text-sm">
             MediaCrawler
           </span>
+          {/* 个人 fork：原作者仓库 Star 入口已隐藏，保留源码备查
           <a
             href="https://github.com/NanmiCoder/MediaCrawler"
             target="_blank"
@@ -38,6 +41,7 @@ export function Sidebar({ onShowDisclaimer }: SidebarProps) {
             <Github className="w-4 h-4 text-cyber-text-secondary" />
             <span className="text-xs font-mono text-cyber-text-secondary">Star</span>
           </a>
+          */}
           {isRunning && (
             <Badge variant="running" className="text-[10px]">
               {t('status.active')}

@@ -39,10 +39,10 @@
     "creatorIds": "CREATOR_ID",
     "creatorIdsHint": "Enter creator ID/URL, one per line or comma-separated",
     "creatorIdsPlaceholder": {
-      "bili": "Examples:\n434377496\nhttps://space.bilibili.com/434377496",
+      "bili": "Examples:\n123456789\nhttps://space.bilibili.com/123456789",
       "xhs": "Examples:\nhttps://www.xiaohongshu.com/user/profile/xxx?xsec_token=xxx\n(must include xsec_token)",
       "dy": "Examples:\nMS4wLjABAAAAxxx\nhttps://www.douyin.com/user/MS4wLjABAAAAxxx",
-      "wb": "Examples:\n5533390220\nhttps://weibo.com/u/5533390220",
+      "wb": "Examples:\n1234567890\nhttps://weibo.com/u/1234567890",
       "ks": "Examples:\n3x84qugg4ch9zhs\nhttps://www.kuaishou.com/profile/xxx",
       "default": "Enter creator ID or URL..."
     },
