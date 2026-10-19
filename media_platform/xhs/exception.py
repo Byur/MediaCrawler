@@ -32,6 +32,24 @@ class IPBlockError(RequestError):
 class PlatformAccessError(RequestError):
     """authentication, rate-limit, or account-security restriction"""
 
+    def __init__(self, *args, status_code: int | None = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        # 429 与 401/403 的处理策略不同：前者值得退避重试，后者应立即停止。
+        self.status_code = status_code
+
+
+class CaptchaError(RequestError):
+    """CAPTCHA challenge (HTTP 461/471) returned instead of the expected payload.
+
+    单独建模的原因：验证码不是"网络抖动"，用相同签名在 1 秒后重放只会加重风控。
+    调用方应显著放慢、冷却，必要时人工介入。
+    """
+
+    def __init__(self, *args, verify_type: str = "", verify_uuid: str = "", **kwargs):
+        super().__init__(*args, **kwargs)
+        self.verify_type = verify_type
+        self.verify_uuid = verify_uuid
+
 
 class NoteNotFoundError(RequestError):
     """Note does not exist or is abnormal"""

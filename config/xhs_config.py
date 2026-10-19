@@ -20,6 +20,9 @@
 
 # Xiaohongshu platform configuration
 
+# 反检测相关的行为（UA/UA-CH 对齐、真实 b1、按接口 Referer、会话轮换、重试策略）
+# 本轮固定写死在 media_platform/xhs/ 里，不提供开关；需要对比时切 git 版本。
+
 # Sorting method, the specific enumeration value is in media_platform/xhs/field.py
 SORT_TYPE = "popularity_descending"
 

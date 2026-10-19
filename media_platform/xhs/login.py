@@ -213,8 +213,11 @@ class XiaoHongShuLogin(AbstractLogin):
     async def login_by_cookies(self):
         """login xiaohongshu website by cookies"""
         utils.logger.info("[XiaoHongShuLogin.login_by_cookies] Begin login xiaohongshu by cookie ...")
+        # a1 是设备指纹 cookie：签名（x-s-common.x5）和 xhshow 都依赖它。
+        # 只写 web_session 会导致 a1 缺失，签名直接失败或退化成"临时新设备"。
+        cookie_whitelist = {"web_session", "a1"}
         for key, value in utils.convert_str_cookie_to_dict(self.cookie_str).items():
-            if key != "web_session":  # Only set web_session cookie attribute
+            if key not in cookie_whitelist:
                 continue
             await self.browser_context.add_cookies([{
                 'name': key,

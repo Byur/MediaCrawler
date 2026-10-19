@@ -136,7 +136,7 @@ STOP_WORDS_FILE = "./docs/hit_stopwords.txt"
 # Chinese font file path
 FONT_PATH = "./docs/STZHONGS.TTF"
 
-# Crawl interval
+# Crawl interval（基准间隔；小红书的实际等待是它的 0.5~1.5 倍，即默认 1~3s）
 CRAWLER_MAX_SLEEP_SEC = 2
 
 # 是否禁用 SSL 证书验证。仅在使用企业代理、Burp Suite、mitmproxy 等会注入自签名证书的中间人代理时设为 True。

@@ -40,11 +40,18 @@ from proxy.proxy_ip_pool import IpInfoModel, create_ip_pool
 from store import xhs as xhs_store
 from tools import utils
 from tools.cdp_browser import CDPBrowserManager
+from tools.humanize import polite_sleep
 from var import crawler_type_var, source_keyword_var
 
 from . import media as xhs_media
+from .browser_profile import (
+    BrowserProfile,
+    build_browser_profile,
+    capture_browser_profile,
+)
 from .client import XiaoHongShuClient
 from .exception import (
+    CaptchaError,
     DataFetchError,
     IPBlockError,
     NoteNotFoundError,
@@ -53,6 +60,22 @@ from .exception import (
 from .field import SearchSortType
 from .help import parse_note_info_from_note_url, parse_creator_info_from_url, get_search_id
 from .login import XiaoHongShuLogin
+
+
+# 关闭浏览器采集（或采集失败）时使用的固定身份。
+# 关键点是「自洽」：UA、UA-CH、平台、语言描述同一台 Mac 上的 Chrome 126，
+# 而不是旧实现里 "UA Mac 126 + sec-ch-ua Windows 136" 那种互相打架的组合。
+_LEGACY_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+)
+_LEGACY_PROFILE = build_browser_profile(
+    user_agent=_LEGACY_USER_AGENT,
+    brands=[["Chromium", "126"], ["Google Chrome", "126"], ["Not.A/Brand", "99"]],
+    ua_platform="macOS",
+    languages=["zh-CN", "zh"],
+    source="legacy",
+)
 
 
 class XiaoHongShuCrawler(AbstractCrawler):
@@ -64,8 +87,10 @@ class XiaoHongShuCrawler(AbstractCrawler):
     def __init__(self) -> None:
         self.index_url = "https://www.rednote.com" if config.XHS_INTERNATIONAL else "https://www.xiaohongshu.com"
         self.cookie_urls = [self.index_url]
-        # self.user_agent = utils.get_user_agent()
-        self.user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+        # UA / UA-CH / 平台 / b1 都从真实浏览器采集后回填（见 _capture_browser_profile）。
+        # 不要写死浏览器版本：写死的 UA 会同时和浏览器实际 UA、UA-CH、签名 x2 冲突。
+        self.user_agent = ""
+        self.browser_profile: Optional[BrowserProfile] = None
         self.cdp_manager = None
         self.ip_proxy_pool = None  # Proxy IP pool for automatic proxy refresh
         self._media_downloader: Optional[MediaDownloader] = None
@@ -84,7 +109,7 @@ class XiaoHongShuCrawler(AbstractCrawler):
                 self.browser_context = await self.launch_browser_with_cdp(
                     playwright,
                     playwright_proxy_format,
-                    self.user_agent,
+                    self.user_agent or None,
                     headless=config.CDP_HEADLESS,
                 )
             else:
@@ -94,7 +119,7 @@ class XiaoHongShuCrawler(AbstractCrawler):
                 self.browser_context = await self.launch_browser(
                     chromium,
                     playwright_proxy_format,
-                    self.user_agent,
+                    self.user_agent or None,
                     headless=config.HEADLESS,
                 )
                 # stealth.min.js is a js script to prevent the website from detecting the crawler.
@@ -102,6 +127,10 @@ class XiaoHongShuCrawler(AbstractCrawler):
 
             self.context_page = await self.browser_context.new_page()
             await self.context_page.goto(self.index_url)
+
+            # 从真实浏览器采集身份：UA / UA-CH / 平台 / 语言 / localStorage b1。
+            # 必须在创建 client 之前完成，HTTP 头与签名都以它为准。
+            await self._capture_browser_profile()
 
             # Create a client to interact with the Xiaohongshu website.
             self.xhs_client = await self.create_xhs_client(httpx_proxy_format)
@@ -118,6 +147,8 @@ class XiaoHongShuCrawler(AbstractCrawler):
                     browser_context=self.browser_context,
                     urls=self.cookie_urls,
                 )
+                # 登录成功后页面会重新加载、SDK 会写入 b1，此时再采集一次身份
+                await self.xhs_client.refresh_browser_profile()
 
             crawler_type_var.set(config.CRAWLER_TYPE)
             if config.CRAWLER_TYPE == "search":
@@ -163,9 +194,12 @@ class XiaoHongShuCrawler(AbstractCrawler):
                         sort=(SearchSortType(config.SORT_TYPE) if config.SORT_TYPE != "" else SearchSortType.GENERAL),
                     )
                     utils.logger.info(f"[XiaoHongShuCrawler.search] Search notes response: {notes_res}")
-                    if not notes_res or not notes_res.get("has_more", False):
+                    if not notes_res:
                         utils.logger.info("[XiaoHongShuCrawler.search] No more content!")
                         break
+                    # 先消费本页 items，再看 has_more：
+                    # 有些响应 has_more=False 但仍有 items（最后一页），提前 break 会静默丢数据。
+                    has_more = bool(notes_res.get("has_more", False))
                     semaphore = asyncio.Semaphore(config.MAX_CONCURRENCY_NUM)
                     task_list = [
                         self.get_note_detail_async_task(
@@ -186,11 +220,19 @@ class XiaoHongShuCrawler(AbstractCrawler):
                     utils.logger.info(f"[XiaoHongShuCrawler.search] Note details: {note_details}")
                     await self.batch_get_note_comments(note_ids, xsec_tokens)
 
-                    # Sleep after each page navigation
-                    await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
-                    utils.logger.info(f"[XiaoHongShuCrawler.search] Sleeping for {config.CRAWLER_MAX_SLEEP_SEC} seconds after page {page-1}")
-                except DataFetchError:
-                    utils.logger.error("[XiaoHongShuCrawler.search] Get note detail error")
+                    if not has_more:
+                        utils.logger.info("[XiaoHongShuCrawler.search] No more content!")
+                        break
+
+                    # Sleep after each page navigation（带抖动的间隔，不再使用固定值）
+                    delay = await polite_sleep(config.CRAWLER_MAX_SLEEP_SEC)
+                    utils.logger.info(f"[XiaoHongShuCrawler.search] Sleeping for {delay:.2f} seconds after page {page-1}")
+                except (DataFetchError, PlatformAccessError, CaptchaError, IPBlockError) as ex:
+                    # 单页失败不应让整个关键词/整个任务崩溃：记录后跳到下一个关键词
+                    utils.logger.error(
+                        f"[XiaoHongShuCrawler.search] 关键词 {keyword} 第 {page} 页爬取中断（{type(ex).__name__}）: {ex}。"
+                        f"建议降低采集频率或更换 IP"
+                    )
                     break
 
     async def get_creators_and_notes(self) -> None:
@@ -214,7 +256,7 @@ class XiaoHongShuCrawler(AbstractCrawler):
             except ValueError as e:
                 utils.logger.error(f"[XiaoHongShuCrawler.get_creators_and_notes] Failed to parse creator URL: {e}")
                 continue
-            except (IPBlockError, PlatformAccessError) as e:
+            except (IPBlockError, PlatformAccessError, CaptchaError, RetryError) as e:
                 # Access restricted on the creator homepage, skip this creator instead of crashing the run.
                 utils.logger.error(
                     f"[XiaoHongShuCrawler.get_creators_and_notes] Access restricted for creator {creator_url}: {e}. "
@@ -306,45 +348,58 @@ class XiaoHongShuCrawler(AbstractCrawler):
         """
         note_detail = None
         utils.logger.info(f"[get_note_detail_async_task] Begin get note detail, note_id: {note_id}")
-        async with semaphore:
-            try:
+        try:
+            async with semaphore:
                 try:
                     note_detail = await self.xhs_client.get_note_by_id(note_id, xsec_source, xsec_token)
                 except RetryError:
                     pass
+                except CaptchaError as ex:
+                    # 验证码在 client 内已经冷却重试过，仍失败说明当前出口已被标记
+                    utils.logger.error(
+                        f"[XiaoHongShuCrawler.get_note_detail_async_task] 获取笔记 {note_id} 时触发验证码: {ex}，跳过"
+                    )
+                    return None
 
                 if not note_detail:
-                    note_detail = await self.xhs_client.get_note_by_id_from_html(note_id, xsec_source, xsec_token,
-                                                                                 enable_cookie=True)
-                    if not note_detail:
-                        utils.logger.warning(f"[skip] Failed to get note detail, Id: {note_id}, 跳过继续")
-                        return None
+                    try:
+                        note_detail = await self.xhs_client.get_note_by_id_from_html(
+                            note_id, xsec_source, xsec_token, enable_cookie=True
+                        )
+                    except (RetryError, CaptchaError):
+                        note_detail = None
+
+                if not note_detail:
+                    utils.logger.warning(f"[skip] Failed to get note detail, Id: {note_id}, 跳过继续")
+                    return None
 
                 note_detail.update({"xsec_token": xsec_token, "xsec_source": xsec_source})
 
-                # Sleep after fetching note detail
-                await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
-                utils.logger.info(f"[get_note_detail_async_task] Sleeping for {config.CRAWLER_MAX_SLEEP_SEC} seconds after fetching note {note_id}")
+                # 节奏控制放在信号量内部：它本身就是"每个并发槽位的最小请求间隔"，
+                # 移出去会让请求变成"先连发一堆、再集体静默"，反而更像脚本。
+                # 这里只把固定 2.000s 换成带抖动的间隔。
+                delay = await polite_sleep(config.CRAWLER_MAX_SLEEP_SEC)
+                utils.logger.info(f"[get_note_detail_async_task] Sleeping for {delay:.2f} seconds after fetching note {note_id}")
 
                 return note_detail
 
-            except NoteNotFoundError as ex:
-                utils.logger.warning(f"[XiaoHongShuCrawler.get_note_detail_async_task] Note not found: {note_id}, {ex}")
-                return None
-            except (IPBlockError, PlatformAccessError) as ex:
-                # Access restricted (IP block / rate limit / account security).
-                # Skip this note instead of aborting the whole asyncio.gather batch.
-                utils.logger.error(
-                    f"[XiaoHongShuCrawler.get_note_detail_async_task] Access restricted while getting note {note_id}: {ex}. "
-                    f"建议降低采集频率、更换 IP 或检查账号状态"
-                )
-                return None
-            except DataFetchError as ex:
-                utils.logger.error(f"[XiaoHongShuCrawler.get_note_detail_async_task] Get note detail error: {ex}")
-                return None
-            except KeyError as ex:
-                utils.logger.error(f"[XiaoHongShuCrawler.get_note_detail_async_task] have not fund note detail note_id:{note_id}, err: {ex}")
-                return None
+        except NoteNotFoundError as ex:
+            utils.logger.warning(f"[XiaoHongShuCrawler.get_note_detail_async_task] Note not found: {note_id}, {ex}")
+            return None
+        except (IPBlockError, PlatformAccessError) as ex:
+            # Access restricted (IP block / rate limit / account security).
+            # Skip this note instead of aborting the whole asyncio.gather batch.
+            utils.logger.error(
+                f"[XiaoHongShuCrawler.get_note_detail_async_task] Access restricted while getting note {note_id}: {ex}. "
+                f"建议降低采集频率、更换 IP 或检查账号状态"
+            )
+            return None
+        except DataFetchError as ex:
+            utils.logger.error(f"[XiaoHongShuCrawler.get_note_detail_async_task] Get note detail error: {ex}")
+            return None
+        except KeyError as ex:
+            utils.logger.error(f"[XiaoHongShuCrawler.get_note_detail_async_task] have not fund note detail note_id:{note_id}, err: {ex}")
+            return None
 
     async def batch_get_note_comments(self, note_list: List[str], xsec_tokens: List[str]):
         """Batch get note comments"""
@@ -365,21 +420,45 @@ class XiaoHongShuCrawler(AbstractCrawler):
 
     async def get_comments(self, note_id: str, xsec_token: str, semaphore: asyncio.Semaphore):
         """Get note comments with keyword filtering and quantity limitation"""
-        async with semaphore:
-            utils.logger.info(f"[XiaoHongShuCrawler.get_comments] Begin get note id comments {note_id}")
-            # Use fixed crawling interval
-            crawl_interval = config.CRAWLER_MAX_SLEEP_SEC
-            await self.xhs_client.get_note_all_comments(
-                note_id=note_id,
-                xsec_token=xsec_token,
-                crawl_interval=crawl_interval,
-                callback=xhs_store.batch_update_xhs_note_comments,
-                max_count=config.CRAWLER_MAX_COMMENTS_COUNT_SINGLENOTES,
-            )
+        # Use fixed crawling interval
+        crawl_interval = config.CRAWLER_MAX_SLEEP_SEC
+        try:
+            async with semaphore:
+                utils.logger.info(f"[XiaoHongShuCrawler.get_comments] Begin get note id comments {note_id}")
+                await self.xhs_client.get_note_all_comments(
+                    note_id=note_id,
+                    xsec_token=xsec_token,
+                    crawl_interval=crawl_interval,
+                    callback=xhs_store.batch_update_xhs_note_comments,
+                    max_count=config.CRAWLER_MAX_COMMENTS_COUNT_SINGLENOTES,
+                )
 
-            # Sleep after fetching comments
-            await asyncio.sleep(crawl_interval)
-            utils.logger.info(f"[XiaoHongShuCrawler.get_comments] Sleeping for {crawl_interval} seconds after fetching comments for note {note_id}")
+                # Sleep after fetching comments（带抖动的间隔，放在信号量内维持每个槽位的节奏）
+                delay = await polite_sleep(crawl_interval)
+                utils.logger.info(f"[XiaoHongShuCrawler.get_comments] Sleeping for {delay:.2f} seconds after fetching comments for note {note_id}")
+        except (DataFetchError, PlatformAccessError, CaptchaError, IPBlockError) as ex:
+            # 评论是旁路数据：单篇失败/触发验证码时跳过，不要让整个任务崩掉
+            utils.logger.error(
+                f"[XiaoHongShuCrawler.get_comments] 获取笔记 {note_id} 评论失败（{type(ex).__name__}）: {ex}，跳过"
+            )
+            return
+
+    async def _capture_browser_profile(self) -> BrowserProfile:
+        """从真实浏览器采集身份（UA / UA-CH / 平台 / 语言 / localStorage b1）。"""
+        try:
+            profile = await capture_browser_profile(
+                self.context_page,
+                fallback_user_agent=self.user_agent or _LEGACY_USER_AGENT,
+                wait_for_b1_seconds=3.0,
+            )
+        except Exception as exc:  # noqa: BLE001 - 采集失败时降级，不阻断爬取
+            utils.logger.warning(f"[XiaoHongShuCrawler] 采集浏览器身份失败，改用固定身份: {exc}")
+            profile = _LEGACY_PROFILE
+        self.browser_profile = profile
+        if profile.user_agent:
+            self.user_agent = profile.user_agent
+        utils.logger.info(f"[XiaoHongShuCrawler] 浏览器身份: {profile.as_dict()}")
+        return profile
 
     async def create_xhs_client(self, httpx_proxy: Optional[str]) -> XiaoHongShuClient:
         """Create Xiaohongshu client"""
@@ -388,29 +467,40 @@ class XiaoHongShuCrawler(AbstractCrawler):
             self.browser_context,
             urls=self.cookie_urls,
         )
+        profile = self.browser_profile or _LEGACY_PROFILE
+
+        headers: Dict[str, str] = {
+            "accept": "application/json, text/plain, */*",
+            "cache-control": "no-cache",
+            "content-type": "application/json;charset=UTF-8",
+            "origin": self.index_url,
+            "priority": "u=1, i",
+            "referer": f"{self.index_url}/",
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "same-site",
+            "user-agent": profile.user_agent or _LEGACY_USER_AGENT,
+            "Cookie": cookie_str,
+        }
+        # 身份头全部来自同一份 profile：UA、UA-CH、语言要么同源，要么一起缺省。
+        if profile.accept_language:
+            headers["accept-language"] = profile.accept_language
+        if profile.ua_brands:
+            headers["sec-ch-ua"] = profile.ua_brands
+            if profile.ua_platform:
+                headers["sec-ch-ua-platform"] = profile.ua_platform
+            if profile.ua_mobile:
+                headers["sec-ch-ua-mobile"] = profile.ua_mobile
+        # 注意：不再发送 pragma。真实浏览器的 XHR/fetch 不会带这个头，
+        # 它只是 Python requests/curl 风格客户端的默认行为。
+
         xhs_client_obj = XiaoHongShuClient(
             proxy=httpx_proxy,
-            headers={
-                "accept": "application/json, text/plain, */*",
-                "accept-language": "zh-CN,zh;q=0.9",
-                "cache-control": "no-cache",
-                "content-type": "application/json;charset=UTF-8",
-                "origin": self.index_url,
-                "pragma": "no-cache",
-                "priority": "u=1, i",
-                "referer": f"{self.index_url}/",
-                "sec-ch-ua": '"Chromium";v="136", "Google Chrome";v="136", "Not.A/Brand";v="99"',
-                "sec-ch-ua-mobile": "?0",
-                "sec-ch-ua-platform": '"Windows"',
-                "sec-fetch-dest": "empty",
-                "sec-fetch-mode": "cors",
-                "sec-fetch-site": "same-site",
-                "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
-                "Cookie": cookie_str,
-            },
+            headers=headers,
             playwright_page=self.context_page,
             cookie_dict=cookie_dict,
             proxy_ip_pool=self.ip_proxy_pool,  # Pass proxy pool for automatic refresh
+            browser_profile=profile,
         )
         return xhs_client_obj
 
@@ -517,6 +607,6 @@ class XiaoHongShuCrawler(AbstractCrawler):
     def _media_headers(self) -> Dict:
         """媒体请求头：平台 Referer（防盗链）+ UA"""
         return {
-            "Referer": "https://www.xiaohongshu.com/",
-            "User-Agent": self.user_agent,
+            "Referer": f"{self.index_url}/",
+            "User-Agent": self.user_agent or _LEGACY_USER_AGENT,
         }
