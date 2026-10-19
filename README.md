@@ -213,6 +213,32 @@ data/xhs/media/{帖子ID}/
 </details>
 
 <details>
+<summary>🤖 <strong>Agent 接口（CLI + Skill）</strong></summary>
+
+给 agent 用的后台作业 CLI：JSON 输出、作业状态机、Cookie 不落命令行。完整契约见 [docs/agent-interface.md](docs/agent-interface.md)，操作手册（skill）安装在全局 skill 目录 `~/.agents/skills/mediacrawler/SKILL.md`（DSH 的 user-agents 根，自动加载）。
+
+```shell
+# 环境自检（依赖 / 浏览器 / 数据目录 / 已保存的登录态）
+.venv/bin/python -m tools.agent_cli doctor
+
+# 启动一个 20 篇的小样本作业（后台运行，秒回 job id）
+.venv/bin/python -m tools.agent_cli start --platform xhs --keywords "咖啡" --max-notes 20
+
+# 轮询 / 看日志 / 取结果 / 停止
+.venv/bin/python -m tools.agent_cli status   <job_id>
+.venv/bin/python -m tools.agent_cli logs     <job_id> -n 100
+.venv/bin/python -m tools.agent_cli results  <job_id>
+.venv/bin/python -m tools.agent_cli peek     <job_id> --kind contents --limit 3
+.venv/bin/python -m tools.agent_cli stop     <job_id>
+```
+
+- 作业元数据在 `data/agent/jobs/`，结果仍在 `data/<platform>/...`
+- Cookie 用 `--cookie-file` 传入（或 `MEDIACRAWLER_COOKIES` 环境变量），不会出现在 argv、进程列表或作业记录里
+- 同一平台默认只允许一个作业；默认小样本（20 篇、不抓评论、不下载媒体）
+
+</details>
+
+<details>
 <summary>🖥️ <strong>WebUI 可视化操作界面</strong></summary>
 
 MediaCrawler 提供了基于 Web 的可视化操作界面，无需命令行也能轻松使用爬虫功能。
