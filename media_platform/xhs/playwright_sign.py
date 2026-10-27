@@ -162,7 +162,11 @@ class XhsSigner:
     ) -> Dict[str, str]:
         """生成完整签名头（小写 key，与浏览器在 HTTP/2 上的形态一致）。"""
         if not _XHSHOW_AVAILABLE or self._client is None:
-            return {}
+            # 不能静默返回空头：那等于发送无签名请求，最终表现为难排查的 461/403。
+            raise RuntimeError(
+                "xhshow 签名库不可用（依赖导入失败），拒绝发送无签名请求；"
+                "请安装 requirements 中锁定的 xhshow 版本"
+            )
 
         self._maybe_rotate_session()
 

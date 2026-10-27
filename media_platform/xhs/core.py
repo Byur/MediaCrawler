@@ -21,6 +21,7 @@ import asyncio
 import os
 import random
 from asyncio import Task
+from dataclasses import replace
 from typing import Dict, List, Optional
 
 from playwright.async_api import (
@@ -62,19 +63,21 @@ from .help import parse_note_info_from_note_url, parse_creator_info_from_url, ge
 from .login import XiaoHongShuLogin
 
 
-# 关闭浏览器采集（或采集失败）时使用的固定身份。
-# 关键点是「自洽」：UA、UA-CH、平台、语言描述同一台 Mac 上的 Chrome 126，
+# 稳定浏览器身份样张。
+# 用于两个场景：(1) headless 模式——真实 UA 会自报 HeadlessChrome；
+# (2) 浏览器采集失败——没有可信的真实身份可用。
+# 关键点是「自洽」：UA、UA-CH、平台、语言描述同一台 Mac 上的 Chrome 155，
 # 而不是旧实现里 "UA Mac 126 + sec-ch-ua Windows 136" 那种互相打架的组合。
-_LEGACY_USER_AGENT = (
+_STABLE_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+    "(KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36"
 )
-_LEGACY_PROFILE = build_browser_profile(
-    user_agent=_LEGACY_USER_AGENT,
-    brands=[["Chromium", "126"], ["Google Chrome", "126"], ["Not.A/Brand", "99"]],
+_STABLE_PROFILE = build_browser_profile(
+    user_agent=_STABLE_USER_AGENT,
+    brands=[["Chromium", "155"], ["Google Chrome", "155"], ["Not.A/Brand", "99"]],
     ua_platform="macOS",
     languages=["zh-CN", "zh"],
-    source="legacy",
+    source="stable",
 )
 
 
@@ -102,6 +105,12 @@ class XiaoHongShuCrawler(AbstractCrawler):
             ip_proxy_info: IpInfoModel = await self.ip_proxy_pool.get_proxy()
             playwright_proxy_format, httpx_proxy_format = utils.format_proxy_info(ip_proxy_info)
 
+        headless = config.CDP_HEADLESS if config.ENABLE_CDP_MODE else config.HEADLESS
+        # headless 浏览器（chrome-headless-shell）会在 UA 里自报 HeadlessChrome，
+        # 且没有 navigator.userAgentData。启动时就用稳定样张覆盖 UA，
+        # 让浏览器与 API 使用同一份身份，避免"浏览器 headless、API 声称 Mac"的割裂。
+        launch_user_agent = _STABLE_USER_AGENT if headless else None
+
         async with async_playwright() as playwright:
             # Choose launch mode based on configuration
             if config.ENABLE_CDP_MODE:
@@ -109,7 +118,7 @@ class XiaoHongShuCrawler(AbstractCrawler):
                 self.browser_context = await self.launch_browser_with_cdp(
                     playwright,
                     playwright_proxy_format,
-                    self.user_agent or None,
+                    launch_user_agent,
                     headless=config.CDP_HEADLESS,
                 )
             else:
@@ -119,7 +128,7 @@ class XiaoHongShuCrawler(AbstractCrawler):
                 self.browser_context = await self.launch_browser(
                     chromium,
                     playwright_proxy_format,
-                    self.user_agent or None,
+                    launch_user_agent,
                     headless=config.HEADLESS,
                 )
                 # stealth.min.js is a js script to prevent the website from detecting the crawler.
@@ -148,6 +157,13 @@ class XiaoHongShuCrawler(AbstractCrawler):
                     urls=self.cookie_urls,
                 )
                 # 登录成功后页面会重新加载、SDK 会写入 b1，此时再采集一次身份
+                await self.xhs_client.refresh_browser_profile()
+            elif (
+                self.xhs_client.browser_profile is not None
+                and not self.xhs_client.browser_profile.has_real_b1
+            ):
+                # 已登录但启动时没等到真实 b1（慢网络 / SDK 延迟）时补采一次，
+                # 避免整个长跑都用逐请求变化的合成指纹。
                 await self.xhs_client.refresh_browser_profile()
 
             crawler_type_var.set(config.CRAWLER_TYPE)
@@ -352,10 +368,15 @@ class XiaoHongShuCrawler(AbstractCrawler):
             async with semaphore:
                 try:
                     note_detail = await self.xhs_client.get_note_by_id(note_id, xsec_source, xsec_token)
-                except RetryError:
-                    pass
+                except (RetryError, DataFetchError) as ex:
+                    # API 失败（含重试耗尽）后仍走 HTML 兜底：
+                    # 父版本里 DataFetchError 会被 tenacity 包成 RetryError 走到这里，
+                    # 改成 _fetch 后不再包 RetryError，这里显式补上，避免静默丢笔记。
+                    utils.logger.info(
+                        f"[get_note_detail_async_task] API 获取笔记 {note_id} 失败（{type(ex).__name__}），尝试 HTML 兜底"
+                    )
                 except CaptchaError as ex:
-                    # 验证码在 client 内已经冷却重试过，仍失败说明当前出口已被标记
+                    # 验证码已单独建模且不做内联重试：461/471 通常意味着当前出口已被标记
                     utils.logger.error(
                         f"[XiaoHongShuCrawler.get_note_detail_async_task] 获取笔记 {note_id} 时触发验证码: {ex}，跳过"
                     )
@@ -444,16 +465,44 @@ class XiaoHongShuCrawler(AbstractCrawler):
             return
 
     async def _capture_browser_profile(self) -> BrowserProfile:
-        """从真实浏览器采集身份（UA / UA-CH / 平台 / 语言 / localStorage b1）。"""
+        """从真实浏览器采集身份（UA / UA-CH / 平台 / 语言 / localStorage b1）。
+
+        headless 模式或采集失败时使用稳定身份样张：headless 浏览器会在 UA 里
+        自报 HeadlessChrome（且通常没有 navigator.userAgentData），直接透传等于
+        向服务端声明自己是机器人；此时只从浏览器取真实 b1，UA/UA-CH/平台改用
+        样张，保证 HTTP 头与签名内部自洽。
+        """
         try:
-            profile = await capture_browser_profile(
+            captured = await capture_browser_profile(
                 self.context_page,
-                fallback_user_agent=self.user_agent or _LEGACY_USER_AGENT,
+                fallback_user_agent=self.user_agent or _STABLE_USER_AGENT,
                 wait_for_b1_seconds=3.0,
             )
         except Exception as exc:  # noqa: BLE001 - 采集失败时降级，不阻断爬取
-            utils.logger.warning(f"[XiaoHongShuCrawler] 采集浏览器身份失败，改用固定身份: {exc}")
-            profile = _LEGACY_PROFILE
+            utils.logger.warning(f"[XiaoHongShuCrawler] 采集浏览器身份失败，改用稳定身份样张: {exc}")
+            captured = _STABLE_PROFILE
+
+        captured_ua = captured.user_agent or ""
+        if (
+            captured.source == "fallback"
+            or "HeadlessChrome" in captured_ua
+            or captured_ua == _STABLE_USER_AGENT
+        ):
+            # 只保留真实 b1；UA/UA-CH/平台/语言统一用稳定样张，保证内部自洽
+            profile = replace(_STABLE_PROFILE, b1=captured.b1, source="stable")
+            if captured.source == "fallback":
+                utils.logger.warning(
+                    "[XiaoHongShuCrawler] 浏览器身份采集失败，改用稳定身份样张（Chrome 155 / macOS）"
+                )
+            else:
+                utils.logger.warning(
+                    "[XiaoHongShuCrawler] 检测到 headless/覆盖后的 UA：使用稳定身份样张（Chrome 155 / macOS），"
+                    f"真实 b1={bool(captured.b1)}。headless 仍有其他可识别特征，正式采集建议 "
+                    "HEADLESS=False 或 CDP 连接真实浏览器"
+                )
+        else:
+            profile = captured
+
         self.browser_profile = profile
         if profile.user_agent:
             self.user_agent = profile.user_agent
@@ -467,7 +516,7 @@ class XiaoHongShuCrawler(AbstractCrawler):
             self.browser_context,
             urls=self.cookie_urls,
         )
-        profile = self.browser_profile or _LEGACY_PROFILE
+        profile = self.browser_profile or _STABLE_PROFILE
 
         headers: Dict[str, str] = {
             "accept": "application/json, text/plain, */*",
@@ -479,7 +528,7 @@ class XiaoHongShuCrawler(AbstractCrawler):
             "sec-fetch-dest": "empty",
             "sec-fetch-mode": "cors",
             "sec-fetch-site": "same-site",
-            "user-agent": profile.user_agent or _LEGACY_USER_AGENT,
+            "user-agent": profile.user_agent or _STABLE_USER_AGENT,
             "Cookie": cookie_str,
         }
         # 身份头全部来自同一份 profile：UA、UA-CH、语言要么同源，要么一起缺省。
@@ -608,5 +657,5 @@ class XiaoHongShuCrawler(AbstractCrawler):
         """媒体请求头：平台 Referer（防盗链）+ UA"""
         return {
             "Referer": f"{self.index_url}/",
-            "User-Agent": self.user_agent or _LEGACY_USER_AGENT,
+            "User-Agent": self.user_agent or _STABLE_USER_AGENT,
         }

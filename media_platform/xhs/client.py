@@ -20,6 +20,7 @@
 import asyncio
 import json
 import random
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Union
 from urllib.parse import quote
 
@@ -170,17 +171,48 @@ class XiaoHongShuClient(AbstractApiClient, ProxyRefreshMixin):
             )
 
     async def refresh_browser_profile(self, page: Optional[Page] = None) -> Optional[BrowserProfile]:
-        """重新采集浏览器身份（登录后 b1 / UA 可能才真正就绪）。"""
+        """重新采集浏览器身份（登录后 b1 / UA 可能才真正就绪）。
+
+        只做「补充」不做「降级」：登录跳转期间一次 ``page.evaluate`` 失败，
+        不应该把启动时已拿到的真实 b1 覆盖成空（否则会退回逐请求变化的合成指纹）。
+        """
         target = page or self.playwright_page
         if target is None or not hasattr(target, "evaluate"):
             return self.browser_profile
-        profile = await capture_browser_profile(
-            target,
-            fallback_user_agent=self.headers.get("user-agent", ""),
-            wait_for_b1_seconds=3.0,
-        )
-        self.apply_browser_profile(profile)
-        return profile
+
+        current = self.browser_profile
+        try:
+            captured = await capture_browser_profile(
+                target,
+                fallback_user_agent=self.headers.get("user-agent", ""),
+                wait_for_b1_seconds=3.0,
+            )
+        except Exception as exc:  # noqa: BLE001 - 补采失败不应影响已建立的会话
+            utils.logger.warning(
+                f"[XiaoHongShuClient.refresh_browser_profile] 重新采集身份异常，保留启动时身份: {exc}"
+            )
+            return current
+
+        if current is not None and current.source == "stable":
+            # headless / 稳定样张身份：只补 b1，不采用浏览器自报的 UA/UA-CH
+            if captured.b1 and captured.b1 != current.b1:
+                self.apply_browser_profile(replace(current, b1=captured.b1))
+            return self.browser_profile
+
+        if captured.source == "fallback":
+            utils.logger.warning(
+                "[XiaoHongShuClient.refresh_browser_profile] 重新采集身份失败，保留启动时身份"
+            )
+            return current
+
+        if current is not None and current.has_real_b1 and not captured.b1:
+            utils.logger.warning(
+                "[XiaoHongShuClient.refresh_browser_profile] 新采集结果没有 b1，保留已有真实 b1"
+            )
+            return current
+
+        self.apply_browser_profile(captured)
+        return captured
 
     # ------------------------------------------------------------------ 请求头
     def _endpoint_referer(
@@ -359,7 +391,16 @@ class XiaoHongShuClient(AbstractApiClient, ProxyRefreshMixin):
         if return_response:
             return response.text
 
-        data: Dict = response_data if response_data is not None else response.json()
+        if response_data is None:
+            # 非 JSON 响应（WAF/验证码 HTML 页、空 body、5xx 页面）：
+            # 不能直接抛 JSONDecodeError，否则会绕过上层按 DataFetchError 设计的降级逻辑，
+            # 从 asyncio.gather 里穿出去终止整批任务。
+            raise DataFetchError(
+                "XHS returned non-JSON response: "
+                f"HTTP {response.status_code}, body={(response.text or '')[:200]!r}"
+            )
+
+        data: Dict = response_data
         if data["success"]:
             return data.get("data", data.get("success", {}))
         # IP_ERROR_CODE / SECURITY_LIMIT_CODE are already handled above, before return_response.
@@ -400,7 +441,6 @@ class XiaoHongShuClient(AbstractApiClient, ProxyRefreshMixin):
         """
         method = method.upper()
         attempts = MAX_REQUEST_ATTEMPTS
-        last_exc: Optional[BaseException] = None
 
         for attempt in range(1, attempts + 1):
             headers = await self._pre_headers(
@@ -440,24 +480,26 @@ class XiaoHongShuClient(AbstractApiClient, ProxyRefreshMixin):
                 # 验证码与"笔记不存在"一样，重试没有意义，直接交给上层决定是否跳过。
                 raise
             except PlatformAccessError as exc:
-                last_exc = exc
                 status_code = getattr(exc, "status_code", None)
                 # 只有 429（限流）值得退避重试；401/403 重试只会加重风控
                 if status_code == 429 and attempt < attempts:
                     await self._sleep_backoff(attempt, "HTTP 429 rate limited")
                     continue
                 raise
-            except (DataFetchError, httpx.RequestError) as exc:
-                last_exc = exc
+            except httpx.RequestError as exc:
+                # DataFetchError（业务拒绝）与传输层错误（超时/连接失败）都重试；
+                # 重试耗尽后统一包装成 DataFetchError：上层（search / 笔记详情 / 评论）
+                # 都是按 DataFetchError 降级的，不能让裸 httpx.ReadTimeout 穿过
+                # asyncio.gather 终止整批任务。
                 if attempt < attempts:
                     await self._sleep_backoff(attempt, type(exc).__name__)
                     continue
-                raise
-
-        # 理论上不会走到这里
-        if last_exc is not None:
-            raise last_exc
-        raise DataFetchError(f"{uri} request failed without exception")
+                if isinstance(exc, DataFetchError):
+                    raise
+                raise DataFetchError(
+                    f"{uri} request failed after {attempts} attempts "
+                    f"({type(exc).__name__}): {exc}"
+                ) from exc
 
     @staticmethod
     def _build_query_string(params: Dict) -> str:

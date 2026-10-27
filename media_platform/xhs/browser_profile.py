@@ -125,14 +125,15 @@ _B1_SCRIPT = """
 def _platform_from_user_agent(user_agent: str) -> str:
     """从 UA 推断 UA-CH 平台名（macOS / Windows / Linux ...）。"""
     ua = user_agent or ""
+    # iOS 的 UA 里也含 "like Mac OS X"，必须先于 macOS 判断
+    if "iPhone" in ua or "iPad" in ua or "iPod" in ua:
+        return "iOS"
     if "Windows NT" in ua:
         return "Windows"
     if "Macintosh" in ua or "Mac OS X" in ua or "Mac OS" in ua:
         return "macOS"
     if "Android" in ua:
         return "Android"
-    if "iPhone" in ua or "iPad" in ua or "iPod" in ua:
-        return "iOS"
     if "CrOS" in ua:
         return "Chrome OS"
     if "Linux" in ua or "X11" in ua:
@@ -168,6 +169,14 @@ def identity_conflicts(profile: BrowserProfile) -> List[str]:
     if ua and not profile.platform:
         conflicts.append("无法从身份推导平台，签名 x2 会退回 xhshow 默认的 Windows")
 
+    # 平台一致性不依赖 UA-CH 是否齐全（UA-CH 缺失时也能从 UA 看出来）
+    ch_platform = (profile.ua_platform or "").strip('"')
+    ua_platform = _platform_from_user_agent(ua)
+    if ch_platform and ua_platform and ch_platform != ua_platform:
+        conflicts.append(
+            f"UA 平台 {ua_platform} 与 sec-ch-ua-platform {ch_platform} 不一致"
+        )
+
     if not profile.ua_brands:
         return conflicts
 
@@ -176,13 +185,6 @@ def identity_conflicts(profile: BrowserProfile) -> List[str]:
     if ua_major and brand_majors and ua_major not in brand_majors:
         conflicts.append(
             f"UA 大版本 {ua_major} 不在 sec-ch-ua 的版本 {brand_majors} 里"
-        )
-
-    ch_platform = (profile.ua_platform or "").strip('"')
-    ua_platform = _platform_from_user_agent(ua)
-    if ch_platform and ua_platform and ch_platform != ua_platform:
-        conflicts.append(
-            f"UA 平台 {ua_platform} 与 sec-ch-ua-platform {ch_platform} 不一致"
         )
 
     return conflicts
@@ -206,11 +208,17 @@ def build_browser_profile(
     ua = (user_agent or "").strip()
     ua_platform = (ua_platform or "").strip() or _platform_from_user_agent(ua)
 
-    ua_brands = (
-        ", ".join(f'"{brand}";v="{version}"' for brand, version in brands if brand)
-        if brands
-        else ""
-    )
+    ua_brands_parts: List[str] = []
+    for entry in brands or []:
+        try:
+            brand, version = entry
+        except (TypeError, ValueError):
+            # 采集到异常结构时跳过该条，不让 build 抛异常（capture 的契约是永不抛）
+            continue
+        brand = str(brand or "").strip()
+        if brand:
+            ua_brands_parts.append(f'"{brand}";v="{version}"')
+    ua_brands = ", ".join(ua_brands_parts)
     language_header = ",".join(
         lang.strip() for lang in (languages or []) if lang and lang.strip()
     )

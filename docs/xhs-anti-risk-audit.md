@@ -17,12 +17,12 @@
 
 ## 0.5 实施状态（2026-10-19 更新）
 
-第一批"低风险、高收益"项已经落地，全部离线可验证（`tests/test_xhs_anti_detect.py`，31 条用例）。
+第一批"低风险、高收益"项已经落地，全部离线可验证（`tests/test_xhs_anti_detect.py`，42 条用例）。
 本轮**不提供任何反检测开关**：行为固定，先跑通、体验一版；需要 A/B 时切 git 版本即可。
 
 | 原评估项 | 本次改动（固定行为） | 验证 |
 |---|---|---|
-| F1/F16（x2 平台与 UA/CH 冲突） | 启动后从 `page.evaluate` 采集真实 UA / UA-CH / 平台 / 语言；`x-s`、`x-s-common` 的 `x2` 与 HTTP 头同源；不覆盖浏览器 UA；采集失败时退回一组**自洽**的固定身份（Mac Chrome 126）；启动时做 UA↔UA-CH↔x2 一致性检查 | `test_signature_platform_matches_configured_identity`、`test_legacy_identity_is_internally_coherent`、`test_identity_conflicts_flags_headless_and_mismatch` |
+| F1/F16（x2 平台与 UA/CH 冲突） | 启动后从 `page.evaluate` 采集真实 UA / UA-CH / 平台 / 语言；`x-s`、`x-s-common` 的 `x2` 与 HTTP 头同源；headful 下不覆盖浏览器 UA；headless / 采集失败时退回一组**自洽**的稳定身份样张（Mac Chrome 155，UA/UA-CH/x2 同源，启动时同时覆盖浏览器 UA）；启动时做 UA↔UA-CH↔x2 一致性检查 | `test_signature_platform_matches_configured_identity`、`test_stable_identity_is_internally_coherent`、`test_headless_capture_uses_stable_identity_with_real_b1`、`test_identity_conflicts_flags_headless_and_mismatch` |
 | F3（b1 合成指纹逐请求抖动） | 读取 `localStorage['b1']` 注入 `x-s-common.x8`，并重算 `x9=crc32(b1)`；取不到时自动退回库的合成 b1 | `test_real_b1_overrides_synthetic_x_s_common` |
 | F4（每请求自称新开页面） | 客户端生命周期内复用 `SessionManager`：`page_load_timestamp` 固定、`sequence` 递增；每 30 分钟（常量）模拟一次页面重载 | `test_session_state_evolves_within_one_page_load` |
 | F5（库算好的头被丢弃） | 返回并使用 `x-xray-traceid` / `x-mns` / `xy-direction` | `test_sign_headers_carry_full_browser_header_set` |
@@ -37,13 +37,20 @@
 
 > **关于"把 sleep 移出信号量"**：实现时发现这条不能单独做。当前 sleep 放在信号量内部，等价于"每个并发槽位的最小请求间隔"，整体是平滑的；一旦移出去而并发 >1，就变成"先连发一串请求、再集体静默"的突发形态，反而比固定间隔更像脚本。正确做法是先加一层**全局请求节流器**（按 `MAX_CONCURRENCY_NUM` 分摊间隔，保证相邻请求开始时间恒定），这属于 1~2 天档位的重构，因此本轮保留 sleep 在信号量内，只做随机化。
 
-**涉及文件**：新增 `media_platform/xhs/browser_profile.py`、`tools/humanize.py`、`tests/test_xhs_anti_detect.py`；修改 `media_platform/xhs/{playwright_sign,client,core,login,exception}.py`、`config/{base_config,xhs_config}.py`。回归：`python -m pytest tests/ -q`（332 passed / 8 skipped）。
+**涉及文件**：新增 `media_platform/xhs/browser_profile.py`、`tools/humanize.py`、`tests/test_xhs_anti_detect.py`；修改 `media_platform/xhs/{playwright_sign,client,core,login,exception}.py`、`config/{base_config,xhs_config}.py`。回归：`python -m pytest tests/ -q`（2026-10-27 复核：354 passed / 8 skipped）。
 
 > **review 后收敛（2026-10-19）**：删除了验证码内联冷却重试（461 通常意味着出口已被标记，冷却重放只会加重风控）、`x-rap` / `sign_format` 两个未验证的实验开关、`browser_profile` 里 UA→UA-CH/语言的合成兜底（没采到就不发该头），以及未使用的属性（`sign_with_xhshow` 作为旧版公共接口保留，内部仍走原始实现）。随后按"先体验一版"的要求，把其余反检测开关（对齐身份 / 真实 b1 / 按接口 referer / 会话轮换 / 重试参数 / 抖动比例）全部固化为代码常量，配置面回到上游原样；长停顿、审计日志则直接删除（前者明确不做，后者等要量化时再加）。同时修了三个小问题：导航头里 `sec-fetch-site: none` 与 `referer` 打架、`query_self` 绕过重试导致启动抖动被误判为未登录、`get_creator_info` 丢失重试。
 
-> **UA 一致性（2026-10-19）**：UA、UA-CH 三件套、签名 `x2`、媒体下载 UA 现在都由同一份 `BrowserProfile` 派生，不存在两套来源。启动时 `identity_conflicts()` 会检查四件事并打 WARNING：UA 含 `HeadlessChrome`（headless 模式自报家门）、UA 大版本不在 `sec-ch-ua` 版本里、UA 平台与 `sec-ch-ua-platform` 不一致、平台无法推导导致 `x2` 退回 Windows。没有采集结果时（启动时 `page.evaluate` 失败）使用一组自洽的 Mac Chrome 126 固定身份，而不是旧的"UA Mac 126 + sec-ch-ua Windows 136"组合。
+> **review 后修复（2026-10-27）**：修了两个会改变运行结果的回归，并确定 headless 的 UA 策略：
+> 1. 非 JSON 响应（WAF/验证码 HTML 页、空 body、5xx 页面）在 `request()` 里转成 `DataFetchError`；重试耗尽的传输层错误（`httpx.RequestError`）也统一包装成 `DataFetchError`，不再让 `JSONDecodeError` / `httpx.ReadTimeout` 穿过 `asyncio.gather` 终止整批任务。
+> 2. 笔记详情 API 失败（`DataFetchError`）后恢复 HTML 兜底：父版本里这类错误经 tenacity 包成 `RetryError` 走到兜底，改成 `_fetch` 后该路径丢失，现在显式补回。
+> 3. 登录后 `refresh_browser_profile()` 只做补充：采集失败、异常或新结果没有 b1 时保留启动时的真实 b1，不再把 b1 冲成空（那会退回逐请求变化的合成指纹）。
+> 4. headless（`HEADLESS` / `CDP_HEADLESS`）使用稳定身份样张 Chrome 155 / macOS：启动时同时覆盖浏览器 UA（避免 `HeadlessChrome` 自报），采集时只保留真实 b1；headful / CDP 连接真实浏览器仍使用真实身份。注意 headless 仍有其他可识别特征，正式采集建议 headful。
+> 另外：xhshow 导入失败改为 fail-fast（不再静默发送无签名请求）；已登录但启动时没等到 b1 会在登录校验后补采一次；修正 iOS UA 被误判为 macOS、异常 `brands` 结构导致 capture 抛错的问题；`identity_conflicts` 的平台检查前移（UA-CH 缺失时也能发现平台矛盾）。
 
-**怎么验证这一版**：跑一次默认配置（搜索 1~2 个关键词即可），看控制台是否出现 `CAPTCHA appeared`、`Access restricted`、`300011/300012`；再对比 `data/` 里的笔记/评论数量是否正常。日志里每个请求的签名头、休眠时长、浏览器身份都会打印。要更细的指标（461 率、间隔 CV、b1 去重数）时再加审计日志。
+> **UA 一致性（2026-10-27 更新）**：UA、UA-CH 三件套、签名 `x2`、媒体下载 UA 现在都由同一份 `BrowserProfile` 派生，不存在两套来源。启动时 `identity_conflicts()` 会检查四件事并打 WARNING：UA 含 `HeadlessChrome`（headless 模式自报家门）、UA 大版本不在 `sec-ch-ua` 版本里、UA 平台与 `sec-ch-ua-platform` 不一致、平台无法推导导致 `x2` 退回 Windows。headful / CDP 连接真实浏览器时使用真实身份；headless（Playwright 的 chrome-headless-shell 会自报 `HeadlessChrome`，且没有 `navigator.userAgentData`）与采集失败时使用一组自洽的 Mac Chrome 155 稳定样张，保证 HTTP 头、签名、媒体 UA 内部一致。headless 下已经不再把 `HeadlessChrome` 发出去，但 headless 仍有其他可识别特征，正式采集建议 `HEADLESS=False` 或 CDP 连接真实浏览器。
+
+**怎么验证这一版**：跑一次默认配置（搜索 1~2 个关键词即可），看控制台是否出现 `CAPTCHA appeared`、`Access restricted`、`300011/300012`；再对比 `data/` 里的笔记/评论数量是否正常。启动时会打印浏览器身份与 UA/UA-CH 一致性告警，每次请求的休眠时长也会打印。要更细的指标（461 率、间隔 CV、b1 去重数）时再加审计日志。
 
 ---
 
@@ -432,7 +439,7 @@ if not notes_res or not notes_res.get("has_more", False):
 9. ⬜ `curl_cffi` 或"请求回浏览器"二选一（E8 的根治）
 10. ⬜ IP/浏览器同源 + IP 信誉表（E11）
 11. ⬜ 预热浏览 + 会话预算/熔断（E9/F22）
-12. ⬜ 把 §6 的指标做成每次运行的报告（审计日志已就绪，缺聚合脚本）
+12. ⬜ 把 §6 的指标做成每次运行的报告（审计日志本轮未做，先靠控制台日志判断）
 
 ---
 

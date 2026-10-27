@@ -11,6 +11,7 @@
 全部离线运行，不访问小红书。
 """
 
+import asyncio
 import base64
 import json
 from unittest.mock import AsyncMock
@@ -605,8 +606,8 @@ async def test_crawler_builds_headers_from_real_browser_identity(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_legacy_identity_is_internally_coherent():
-    """浏览器采集失败时的固定身份也必须自洽：UA、UA-CH、x2 描述同一台设备。"""
+async def test_stable_identity_is_internally_coherent():
+    """浏览器采集失败/headless 时使用的稳定身份也必须自洽：UA、UA-CH、x2 描述同一台设备。"""
     from media_platform.xhs.core import XiaoHongShuCrawler
 
     crawler = XiaoHongShuCrawler.__new__(XiaoHongShuCrawler)
@@ -622,10 +623,230 @@ async def test_legacy_identity_is_internally_coherent():
 
     client = await crawler.create_xhs_client(None)
 
-    assert "Chrome/126.0.0.0" in client.headers["user-agent"]
-    assert 'v="126"' in client.headers["sec-ch-ua"]
+    assert "Chrome/155.0.0.0" in client.headers["user-agent"]
+    assert 'v="155"' in client.headers["sec-ch-ua"]
     assert client.headers["sec-ch-ua-platform"] == '"macOS"'
 
     headers = await client._pre_headers("/api/sns/web/v1/feed", payload={"source_note_id": "n1"})
     assert decode_x_s(headers["x-s"])["x2"] == "Mac OS"
     assert decode_x_s_common(headers["x-s-common"])["x2"] == "Mac OS"
+
+
+class _RaisingPage:
+    """模拟登录跳转期间 page.evaluate 失败（Execution context was destroyed）。"""
+
+    async def evaluate(self, script):
+        raise RuntimeError("Execution context was destroyed")
+
+
+@pytest.mark.asyncio
+async def test_headless_capture_uses_stable_identity_with_real_b1():
+    """headless 浏览器自报 HeadlessChrome 时：HTTP/签名身份用稳定样张，真实 b1 保留。"""
+    from media_platform.xhs.core import XiaoHongShuCrawler, _STABLE_USER_AGENT
+
+    crawler = XiaoHongShuCrawler.__new__(XiaoHongShuCrawler)
+    crawler.index_url = "https://www.xiaohongshu.com"
+    crawler.cookie_urls = [crawler.index_url]
+    crawler.browser_context = _FakeBrowserContext()
+    crawler.context_page = _FakePage(
+        {
+            "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) HeadlessChrome/151.0.0.0 Safari/537.36",
+            "langs": ["zh-CN"],
+            "brands": None,  # chrome-headless-shell 没有 navigator.userAgentData
+            "platform": "",
+            "mobile": False,
+            "b1": "REAL_B1_HEADLESS",
+        }
+    )
+    crawler.user_agent = ""
+    crawler.browser_profile = None
+    crawler.ip_proxy_pool = None
+    crawler.cdp_manager = None
+    crawler._media_downloader = None
+
+    profile = await crawler._capture_browser_profile()
+
+    assert profile.source == "stable"
+    assert profile.user_agent == _STABLE_USER_AGENT
+    assert "HeadlessChrome" not in profile.user_agent
+    assert 'v="155"' in profile.ua_brands
+    assert profile.platform == "Mac OS"
+    assert profile.b1 == "REAL_B1_HEADLESS"
+
+    client = await crawler.create_xhs_client(None)
+    assert "HeadlessChrome" not in client.headers["user-agent"]
+    assert 'v="155"' in client.headers["sec-ch-ua"]
+
+    headers = await client._pre_headers("/api/sns/web/v1/feed", payload={"source_note_id": "n1"})
+    assert decode_x_s(headers["x-s"])["x2"] == "Mac OS"
+    assert decode_x_s_common(headers["x-s-common"])["x8"] == "REAL_B1_HEADLESS"
+
+
+@pytest.mark.asyncio
+async def test_capture_failure_uses_stable_identity():
+    """启动时采集失败也不能退回 UA-only 身份：使用完整自洽的稳定样张。"""
+    from media_platform.xhs.core import XiaoHongShuCrawler, _STABLE_USER_AGENT
+
+    crawler = XiaoHongShuCrawler.__new__(XiaoHongShuCrawler)
+    crawler.context_page = _RaisingPage()
+    crawler.user_agent = ""
+    crawler.browser_profile = None
+
+    profile = await crawler._capture_browser_profile()
+
+    assert profile.source == "stable"
+    assert profile.user_agent == _STABLE_USER_AGENT
+    assert 'v="155"' in profile.ua_brands
+    assert profile.platform == "Mac OS"
+    assert not profile.b1
+
+
+@pytest.mark.asyncio
+async def test_refresh_does_not_downgrade_real_b1():
+    """登录后 refresh 采集失败时，不能把启动时拿到的真实 b1 冲成空。"""
+    profile = build_browser_profile(
+        user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
+        brands=[["Chromium", "141"], ["Google Chrome", "141"]],
+        ua_platform="macOS",
+        languages=["zh-CN", "zh"],
+        b1="REAL_B1",
+        source="browser",
+    )
+    client = XiaoHongShuClient(
+        headers={"Cookie": "a1=AAAA; web_session=S", "user-agent": profile.user_agent},
+        playwright_page=_RaisingPage(),
+        cookie_dict={},
+        browser_profile=profile,
+    )
+
+    refreshed = await client.refresh_browser_profile()
+
+    assert refreshed is not None and refreshed.b1 == "REAL_B1"
+    assert client.browser_profile is not None and client.browser_profile.b1 == "REAL_B1"
+    headers = await client._pre_headers("/api/sns/web/v1/feed", payload={"source_note_id": "n1"})
+    assert decode_x_s_common(headers["x-s-common"])["x8"] == "REAL_B1"
+
+
+@pytest.mark.asyncio
+async def test_refresh_stable_identity_only_adopts_b1():
+    """稳定样张身份 + headless 浏览器：refresh 只补真实 b1，不采用 headless 的 UA/UA-CH。"""
+    from media_platform.xhs.core import _STABLE_PROFILE, _STABLE_USER_AGENT
+
+    client = XiaoHongShuClient(
+        headers={"Cookie": "a1=AAAA; web_session=S", "user-agent": _STABLE_USER_AGENT},
+        playwright_page=_FakePage(
+            {
+                "ua": "Mozilla/5.0 (Macintosh) HeadlessChrome/151.0.0.0 Safari/537.36",
+                "langs": ["zh-CN"],
+                "brands": [["Chromium", "151"]],
+                "platform": "macOS",
+                "mobile": False,
+                "b1": "REAL_B1_AFTER_LOGIN",
+            }
+        ),
+        cookie_dict={},
+        browser_profile=_STABLE_PROFILE,
+    )
+
+    refreshed = await client.refresh_browser_profile()
+
+    assert refreshed is not None
+    assert refreshed.b1 == "REAL_B1_AFTER_LOGIN"
+    assert refreshed.user_agent == _STABLE_USER_AGENT
+    assert 'v="155"' in refreshed.ua_brands
+    assert refreshed.source == "stable"
+
+
+@pytest.mark.asyncio
+async def test_non_json_response_raises_data_fetch_error(monkeypatch):
+    """WAF/验证码 HTML 页（200 + 非 JSON）不能被 JSONDecodeError 击穿。"""
+
+    async def request_impl(method, url, **kwargs):
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/html"},
+            text="<html>challenge page</html>",
+            request=httpx.Request(method, url),
+        )
+
+    monkeypatch.setattr(
+        "media_platform.xhs.client.make_async_client",
+        lambda **kwargs: FakeAsyncClient(request_impl),
+    )
+    monkeypatch.setattr("media_platform.xhs.client.RETRY_BASE_DELAY_SEC", 0.0)
+
+    with pytest.raises(DataFetchError):
+        await make_client().get_note_by_id("n1", "pc_search", "token")
+
+
+@pytest.mark.asyncio
+async def test_transport_error_after_retries_is_wrapped_as_data_fetch_error(monkeypatch):
+    """重试耗尽的传输层错误要包装成 DataFetchError，不能裸穿 asyncio.gather。"""
+    client = make_client()
+    monkeypatch.setattr("media_platform.xhs.client.RETRY_BASE_DELAY_SEC", 0.0)
+    attempts = 0
+
+    async def fake_request(**kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise httpx.ConnectTimeout("boom")
+
+    monkeypatch.setattr(client, "request", fake_request)
+
+    with pytest.raises(DataFetchError):
+        await client.get_note_by_id("n1", "pc_search", "token")
+    assert attempts == 3
+
+
+@pytest.mark.asyncio
+async def test_detail_task_falls_back_to_html_on_data_fetch_error(monkeypatch):
+    """API 业务失败（DataFetchError）后仍要尝试 HTML 兜底，不能静默丢笔记。"""
+    from media_platform.xhs.core import XiaoHongShuCrawler
+
+    monkeypatch.setattr("media_platform.xhs.core.polite_sleep", AsyncMock(return_value=0.0))
+
+    crawler = XiaoHongShuCrawler.__new__(XiaoHongShuCrawler)
+    crawler.xhs_client = AsyncMock()
+    crawler.xhs_client.get_note_by_id = AsyncMock(side_effect=DataFetchError("server biz error"))
+    crawler.xhs_client.get_note_by_id_from_html = AsyncMock(return_value={"note_id": "n1"})
+
+    result = await crawler.get_note_detail_async_task(
+        note_id="n1",
+        xsec_source="pc_search",
+        xsec_token="token",
+        semaphore=asyncio.Semaphore(1),
+    )
+
+    assert result is not None and result["note_id"] == "n1"
+    crawler.xhs_client.get_note_by_id_from_html.assert_awaited_once()
+
+
+def test_ios_user_agent_is_not_treated_as_macos():
+    from media_platform.xhs.browser_profile import _platform_from_user_agent
+
+    ios_ua = (
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 "
+        "(KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
+    )
+    assert _platform_from_user_agent(ios_ua) == "iOS"
+
+
+def test_malformed_brand_entries_do_not_raise():
+    """capture 的契约是永不抛：异常结构只跳过该条，不影响其余身份。"""
+    profile = build_browser_profile(
+        user_agent="UA", brands=[["Chromium"], ["Google Chrome", "155"]], ua_platform="macOS"
+    )
+    assert profile.ua_brands == '"Google Chrome";v="155"'
+
+
+def test_signer_fails_fast_when_xhshow_unavailable(monkeypatch):
+    """签名库不可用时必须报错，不能静默发送无签名请求。"""
+    import media_platform.xhs.playwright_sign as sign_module
+
+    monkeypatch.setattr(sign_module, "_XHSHOW_AVAILABLE", False)
+    signer = XhsSigner(SignProfile(user_agent="UA", platform="Mac OS", b1="B1"))
+
+    with pytest.raises(RuntimeError):
+        signer.sign_headers("POST", "/api/sns/web/v1/feed", "a1=AAAA", {"source_note_id": "n1"})
