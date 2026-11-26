@@ -102,4 +102,138 @@ export const envApi = {
   check: () => api.get<EnvCheckResult>('/env/check'),
 }
 
+export interface LabelComment {
+  author: string
+  nickname: string
+  content: string
+  likes: number
+  at: string | null
+}
+
+export interface LabelVerdict {
+  note_id: string
+  level: string
+  signals: Record<string, number>
+  memo: string
+  saved_at: string
+  score: number
+}
+
+export interface LabelPost {
+  note_id: string
+  type: string
+  title: string
+  desc: string
+  tags: string[]
+  author: string
+  nickname: string
+  published_at: string | null
+  updated_at: string | null
+  liked: number
+  collected: number
+  comments_count: number
+  share: number
+  images: string[]
+  has_media: boolean
+  note_url: string
+  source_keyword: string
+  comments: LabelComment[]
+  verdict: LabelVerdict | null
+}
+
+export interface LabelStats {
+  platform: string
+  total: number
+  labeled: number
+  unlabeled: number
+  levels: Record<string, number>
+  verdict_file: string
+}
+
+export interface GraphNode {
+  id: string
+  kind: 'note' | 'author' | 'peer' | 'user' | 'pnote' | 'user2'
+  label: string
+  sub: string
+  r: number
+  hop?: number
+  center?: boolean
+}
+
+export interface GraphEdge {
+  source: string
+  target: string
+  kind: 'comment' | 'own' | 'sim' | 'comment2' | 'back'
+  weight: number
+}
+
+export interface GraphData {
+  center: string
+  nodes: GraphNode[]
+  edges: GraphEdge[]
+  depth?: number
+  stats: {
+    commenters: number
+    peers: number
+    peer_ratio: number
+    shared_commenters?: number
+    back_edges?: number
+    hop3_users?: number
+    nodes: number
+    edges: number
+    sim_edges: number
+  }
+}
+
+export const labelApi = {
+  getPosts: (params?: {
+    platform?: string
+    limit?: number
+    offset?: number
+    only_unlabeled?: boolean
+  }) =>
+    api.get<{ posts: LabelPost[]; total: number; platform: string; message?: string }>(
+      '/label/posts',
+      { params }
+    ),
+  /** 分页拉取全部帖子，避免界面只看得到固定条数（如默认 200 条）。 */
+  getAllPosts: async (platform = 'xhs', onlyUnlabeled = false) => {
+    const pageSize = 500
+    const posts: LabelPost[] = []
+    let total = 0
+    for (;;) {
+      const res = await api.get<{
+        posts: LabelPost[]
+        total: number
+        platform: string
+        message?: string
+      }>('/label/posts', {
+        params: {
+          platform,
+          limit: pageSize,
+          offset: posts.length,
+          only_unlabeled: onlyUnlabeled,
+        },
+      })
+      total = res.data.total
+      if (res.data.posts.length === 0) break
+      posts.push(...res.data.posts)
+      if (posts.length >= total) break
+    }
+    return { posts, total, platform }
+  },
+  saveVerdict: (payload: {
+    note_id: string
+    level: string
+    signals: Record<string, number>
+    memo: string
+  }) => api.post<{ ok: boolean; verdict: LabelVerdict }>('/label/verdict', payload),
+  getStats: (platform = 'xhs') =>
+    api.get<LabelStats>('/label/stats', { params: { platform } }),
+  getGraph: (noteId?: string, platform = 'xhs', depth = 2) =>
+    api.get<GraphData>('/label/graph', {
+      params: { note_id: noteId || undefined, platform, depth },
+    }),
+}
+
 export default api

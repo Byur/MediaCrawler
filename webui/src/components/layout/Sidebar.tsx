@@ -1,4 +1,4 @@
-import { Bug, Wifi, AlertTriangle } from 'lucide-react'
+import { Bug, Wifi } from 'lucide-react'
 // 个人 fork：隐藏指向原作者仓库的 Star 入口（源码保留）
 // import { Github } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
@@ -9,12 +9,12 @@ import { LanguageSwitch } from './LanguageSwitch'
 import { ThemeToggle } from './ThemeToggle'
 
 interface SidebarProps {
-  onShowDisclaimer?: () => void
+  view?: 'crawler' | 'label' | 'graph'
+  onChangeView?: (view: 'crawler' | 'label' | 'graph') => void
 }
 
-export function Sidebar({ onShowDisclaimer }: SidebarProps) {
+export function Sidebar({ view = 'crawler', onChangeView }: SidebarProps) {
   const { t } = useTranslation()
-  const { t: tLicense } = useTranslation('license')
   const status = useCrawlerStore((state) => state.status)
 
   // Poll status
@@ -50,23 +50,24 @@ export function Sidebar({ onShowDisclaimer }: SidebarProps) {
           {isRunning && (
             <span className="w-2 h-2 bg-cyber-neon-green rounded-full shadow-glow-green-sm animate-pulse-fast" />
           )}
-        </div>
 
-        {/* Center: Warning Text */}
-        <button
-          onClick={onShowDisclaimer}
-          className="flex items-center gap-3 px-4 py-1.5 rounded-lg border border-cyber-neon-orange/50 bg-cyber-neon-orange/10 hover:bg-cyber-neon-orange/20 transition-all cursor-pointer"
-        >
-          <AlertTriangle className="w-4 h-4 text-cyber-neon-orange flex-shrink-0" />
-          <div className="flex items-center gap-4 text-xs font-mono">
-            <span className="text-cyber-neon-orange">
-              <span className="text-cyber-neon-pink font-bold">1.</span> {tLicense('content.line1')}
-            </span>
-            <span className="text-cyber-neon-orange">
-              <span className="text-cyber-neon-pink font-bold">2.</span> {tLicense('content.line2')}
-            </span>
+          {/* 视图切换：采集 / 标注 */}
+          <div className="ml-2 flex items-center rounded-md border border-cyber-border-subtle overflow-hidden">
+            {(['crawler', 'label', 'graph'] as const).map((item) => (
+              <button
+                key={item}
+                onClick={() => onChangeView?.(item)}
+                className={`px-2.5 py-1 text-xs font-mono transition-colors ${
+                  view === item
+                    ? 'bg-cyber-neon-cyan/15 text-cyber-neon-cyan'
+                    : 'text-cyber-text-secondary hover:text-cyber-text-primary'
+                }`}
+              >
+                {item === 'crawler' ? '采集' : item === 'label' ? '标注' : '图谱'}
+              </button>
+            ))}
           </div>
-        </button>
+        </div>
 
         {/* Right: Actions and Status */}
         <div className="flex items-center gap-3">

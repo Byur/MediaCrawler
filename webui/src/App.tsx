@@ -5,55 +5,53 @@ import { MainContent } from '@/components/layout/MainContent'
 // 个人 fork：隐藏原作者页脚（组件源码保留在 AuthorFooter.tsx）
 // import { AuthorFooter } from '@/components/layout/AuthorFooter'
 import { CrawlerConfigPanel } from '@/components/config/CrawlerConfigPanel'
+import { LabelWorkbench } from '@/components/label/LabelWorkbench'
+import { GraphView } from '@/components/graph/GraphView'
 import { EnvironmentCheck, isEnvChecked } from '@/components/env/EnvironmentCheck'
-import { LicenseDisclaimer, isLicenseAccepted } from '@/components/license/LicenseDisclaimer'
+
+export type AppView = 'crawler' | 'label' | 'graph'
 
 function App() {
-  // Initialize by checking localStorage if license has been accepted
-  const [licenseAccepted, setLicenseAccepted] = useState(() => isLicenseAccepted())
+  // 个人 fork：已移除使用责任声明弹窗与入口（非商业个人项目）
   // Initialize by checking localStorage if env check has passed
   const [envChecked, setEnvChecked] = useState(() => isEnvChecked())
-  // State for showing disclaimer manually
-  const [showDisclaimer, setShowDisclaimer] = useState(false)
+  // 顶部视图：采集 / 标注 / 图谱
+  const [view, setView] = useState<AppView>('crawler')
 
   const handleEnvCheckComplete = () => {
     setEnvChecked(true)
   }
 
-  const handleLicenseAccept = () => {
-    setLicenseAccepted(true)
-    setShowDisclaimer(false)
-  }
-
-  const handleShowDisclaimer = () => {
-    setShowDisclaimer(true)
-  }
-
   return (
     <div className="flex flex-col h-screen cyber-grid overflow-hidden relative">
-      {/* License Disclaimer Modal - Shows first or when triggered */}
-      {(!licenseAccepted || showDisclaimer) && (
-        <LicenseDisclaimer onAccept={handleLicenseAccept} />
-      )}
-
-      {/* Environment Check Modal - Shows after license accepted */}
-      {licenseAccepted && !showDisclaimer && !envChecked && (
+      {/* Environment Check Modal */}
+      {!envChecked && (
         <EnvironmentCheck onCheckComplete={handleEnvCheckComplete} />
       )}
 
       {/* Header Bar */}
-      <Sidebar onShowDisclaimer={handleShowDisclaimer} />
+      <Sidebar view={view} onChangeView={setView} />
 
       {/* Main Area */}
-      <div className="flex-1 flex flex-col gap-4 p-4 overflow-hidden min-h-0">
-        {/* Config Panel - Primary Action Area (Always Expanded) */}
-        <div className="flex-shrink-0">
-          <CrawlerConfigPanel />
+      {view === 'label' ? (
+        <div className="flex-1 flex flex-col p-4 overflow-hidden min-h-0">
+          <LabelWorkbench />
         </div>
+      ) : view === 'graph' ? (
+        <div className="flex-1 flex flex-col p-4 overflow-hidden min-h-0">
+          <GraphView />
+        </div>
+      ) : (
+        <div className="flex-1 flex flex-col gap-4 p-4 overflow-hidden min-h-0">
+          {/* Config Panel - Primary Action Area (Always Expanded) */}
+          <div className="flex-shrink-0">
+            <CrawlerConfigPanel />
+          </div>
 
-        {/* Console - Collapsible Terminal */}
-        <MainContent />
-      </div>
+          {/* Console - Collapsible Terminal */}
+          <MainContent />
+        </div>
+      )}
 
       {/* 个人 fork：原作者信息页脚已隐藏，保留源码备查
       <AuthorFooter />
