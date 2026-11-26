@@ -185,3 +185,10 @@ debug_tools
 
 database/*.db
 .omx/
+
+# 本地 Playwright 浏览器缓存（软链到 ~/Library/Caches/ms-playwright，不提交）
+.playwright-browsers/
+
+# 一次性分析产物：只提交脚本与 markdown，原始数据不提交
+reports/*.json
+reports/*.csv
