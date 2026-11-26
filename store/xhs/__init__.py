@@ -27,6 +27,7 @@ import config
 from media_platform.xhs.media import extract_video_urls
 from var import source_keyword_var
 from tools.user_hash import anonymize_user_id, mask_nickname
+from tools.softad_edges import record_edge
 
 from ._store_impl import *
 
@@ -71,6 +72,9 @@ async def update_xhs_note(note_item: Dict):
             img.update({'url': img.get('url_default')})
 
     video_url = ','.join(extract_video_urls(note_item))
+
+    # 边表：仅当 SOFTAD_EDGE_MAP=1 时记录 hash → user_id，用于按需展开主页
+    record_edge("note", user_info.get("user_id"))
 
     local_db_item = {
         "note_id": note_item.get("note_id"),  # Note ID
@@ -127,6 +131,10 @@ async def update_xhs_note_comment(note_id: str, comment_item: Dict):
     comment_id = comment_item.get("id")
     comment_pictures = [item.get("url_default", "") for item in comment_item.get("pictures", [])]
     target_comment = comment_item.get("target_comment", {})
+
+    # 边表：仅当 SOFTAD_EDGE_MAP=1 时记录 hash → user_id，用于按需展开主页
+    record_edge("comment", user_info.get("user_id"))
+
     local_db_item = {
         "comment_id": comment_id,  # Comment ID
         "create_time": comment_item.get("create_time"),  # Comment time
